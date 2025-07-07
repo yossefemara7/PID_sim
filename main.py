@@ -24,7 +24,7 @@ Ki = st.slider("Ki (Integral)", 0.0, 1.5, st.session_state.get("Ki_new", 0.61), 
 Kd = st.slider("Kd (Derivative)", 0.0, 1.0, st.session_state.get("Kd_new", 0.10), 0.01, key="Kd_slider")
 
 # --- System Parameters ---
-mass = 0.2
+mass = 0.75
 damping = st.slider("Damping", 0.0, 1.0, 0.2, 0.05)
 sensor_bias = st.slider("Sensor Bias", -0.2, 0.2, 0.05, 0.01)
 external_force = st.slider("External Force", -0.5, 0.5, 0.15, 0.01)
@@ -86,7 +86,7 @@ if auto_tune:
                 t = 0.0
                 errors = []
                 max_pv = -float("inf")
-                setpoint = 1.0
+                setpoint = [1.0, -1.0, 0.5, -0.5][int(st.session_state.t // 1) % 4]
 
                 for _ in range(tune_steps):
                     measured_pv = pv + sensor_bias
@@ -149,17 +149,19 @@ if show_velocity:
 chart = st.line_chart(st.session_state.data.set_index("Time")[display_cols])
 
 # --- Physical Representation ---
-st.subheader("🧱 Physical Representation (Position on Track)")
+st.subheader("Physical Representation (Position on Track)")
 track_placeholder = st.empty()
+def get_current_setpoint():
+    return [1.0, -1.0, 0.5, -0.5][int(st.session_state.t // 10) % 4]
 
-def draw_physical_system(pv_value):
+def draw_physical_system(pv_value, setpoint_val):
     fig, ax = plt.subplots(figsize=(6, 1.2))
     ax.set_xlim(-3, 3)
     ax.set_ylim(-0.5, 0.5)
     ax.axis('off')
     ax.hlines(0, -3, 3, colors='gray', linewidth=4)
-    ax.axvline(1.0, color='red', linestyle='--', linewidth=2)
-    ax.text(1.0, 0.3, '🎯 Setpoint', color='red', ha='center', fontsize=10)
+    ax.axvline(setpoint_val, color='red', linestyle='--', linewidth=2)
+    ax.text(setpoint_val, 0.3, '🎯 Setpoint', color='red', ha='center', fontsize=10)
     try:
         drone_img = plt.imread("drone.png")
         img_extent = [pv_value - 0.4, pv_value + 0.4, -0.4, 0.4]
@@ -174,11 +176,12 @@ def draw_physical_system(pv_value):
     track_placeholder.image(img)
     plt.close(fig)
 
+
 # --- PID Step Simulation ---
 step_counter = 0
 def pid_step():
     global step_counter
-    setpoint = 1.0
+    setpoint = get_current_setpoint()
     measured_pv = st.session_state.pv + sensor_bias
     error = setpoint - measured_pv
     st.session_state.integral += error * dt
@@ -204,13 +207,15 @@ def pid_step():
         "Output": [output],
         "Velocity": [st.session_state.velocity]
     })
+
     st.session_state.data = pd.concat([st.session_state.data, row], ignore_index=True)
     st.session_state.data = st.session_state.data.tail(1000).reset_index(drop=True)
 
     step_counter += 1
     if step_counter % draw_interval == 0:
         chart.add_rows(row.set_index("Time")[display_cols])
-        draw_physical_system(st.session_state.pv)
+        draw_physical_system(st.session_state.pv, setpoint)
+
 
 # --- Button Logic ---
 if start:
