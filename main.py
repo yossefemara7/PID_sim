@@ -1,45 +1,49 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import time
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
 
 st.set_page_config(layout="centered")
 st.title("Real-Time PID Simulation SRMP UAV Course")
 
-# --- Persistent message after rerun ---
+# --- Persistent Message After Rerun ---
 if "auto_tune_message" in st.session_state:
     st.success(st.session_state["auto_tune_message"])
     del st.session_state["auto_tune_message"]
 
-# --- Fixed Time Step ---
-fps = 30
-dt = 1.0 / fps
+# --- Simulation Parameters ---
+fps = 120 * 4
+dt = 10.0 / fps
+draw_interval = 10
 
-# --- PID Sliders ---
-Kp = st.slider("K (Proportional)", 0.0, 5.0,
-               st.session_state.get("Kp_new", 2.4), 0.1, key="Kp_slider")
-Ki = st.slider("Ki (Integral)", 0.0, 1.5,
-               st.session_state.get("Ki_new", 0.61), 0.01, key="Ki_slider")
-Kd = st.slider("Kd (Derivative)", 0.0, 1.0,
-               st.session_state.get("Kd_new", 0.10), 0.01, key="Kd_slider")
+# --- PID Parameters (User-Controlled) ---
+Kp = st.slider("K (Proportional)", 0.0, 5.0, st.session_state.get("Kp_new", 2.4), 0.1, key="Kp_slider")
+Ki = st.slider("Ki (Integral)", 0.0, 1.5, st.session_state.get("Ki_new", 0.61), 0.01, key="Ki_slider")
+Kd = st.slider("Kd (Derivative)", 0.0, 1.0, st.session_state.get("Kd_new", 0.10), 0.01, key="Kd_slider")
 
 # --- System Parameters ---
-mass = st.slider("Mass (kg)", 0.1, 5.0, 1.0, 0.1)
+mass = 0.2
 damping = st.slider("Damping", 0.0, 1.0, 0.2, 0.05)
+sensor_bias = st.slider("Sensor Bias", -0.2, 0.2, 0.05, 0.01)
+external_force = st.slider("External Force", -0.5, 0.5, 0.15, 0.01)
+disturbance_strength = st.slider("Disturbance Strength", 0.1, 5.0, 1.0, 0.1)
 noise_toggle = st.checkbox("Add Sensor Noise", True)
 show_velocity = st.checkbox("Show Velocity on Chart", False)
 duration = st.slider("Simulation Duration (s)", 1, 30, 10)
 
-# --- Buttons ---
+# --- Control Buttons ---
 col1, col2, col3, col4 = st.columns(4)
 start = col1.button("▶️ Start")
 disturb = col2.button("💥 Inject Disturbance")
 reset = col3.button("🔄 Reset")
 auto_tune = col4.button("🎛️ Brute-Force Auto Tune")
 
-# --- Session State Init ---
+# --- Session State Initialization ---
 if "running" not in st.session_state:
     st.session_state.running = False
+
 if "t" not in st.session_state or reset:
     st.session_state.t = 0.0
     st.session_state.pv = 0.0
@@ -48,58 +52,11 @@ if "t" not in st.session_state or reset:
     st.session_state.prev_error = 0.0
     st.session_state.data = pd.DataFrame(columns=["Time", "Setpoint", "PV", "Output", "Velocity"])
     st.session_state.running = False
+
 if "inject_disturbance" not in st.session_state:
     st.session_state.inject_disturbance = False
 
-# --- Chart ---
-display_cols = ["Setpoint", "PV", "Output"]
-if show_velocity:
-    display_cols.append("Velocity")
-chart = st.line_chart(st.session_state.data.set_index("Time")[display_cols])
-
-# --- PID Step ---
-def pid_step():
-    setpoint = 1.0
-    error = setpoint - st.session_state.pv
-    st.session_state.integral += error * dt
-    derivative = (error - st.session_state.prev_error) / dt
-    output = Kp * error + Ki * st.session_state.integral + Kd * derivative
-    output = np.clip(output, -3, 3)
-
-    if noise_toggle:
-        output += np.random.normal(0, 0.01)
-
-    if st.session_state.inject_disturbance:
-        st.session_state.velocity -= 1.0
-        st.session_state.inject_disturbance = False
-
-    acceleration = (output - damping * st.session_state.velocity) / mass
-    st.session_state.velocity += acceleration * dt
-    st.session_state.pv += st.session_state.velocity * dt
-    st.session_state.pv = np.clip(st.session_state.pv, -3, 3)
-
-    st.session_state.prev_error = error
-    st.session_state.t += dt
-
-    row = pd.DataFrame({
-        "Time": [st.session_state.t],
-        "Setpoint": [setpoint],
-        "PV": [st.session_state.pv],
-        "Output": [output],
-        "Velocity": [st.session_state.velocity]
-    })
-    st.session_state.data = pd.concat([st.session_state.data, row], ignore_index=True)
-    chart.add_rows(row.set_index("Time")[display_cols])
-
-# --- Button Logic ---
-if start:
-    st.session_state.running = True
-if disturb:
-    st.session_state.inject_disturbance = True
-if reset:
-    st.session_state.running = False
-
-# --- Brute-Force Auto-Tune ---
+# --- Brute-Force Auto Tune ---
 if auto_tune:
     st.session_state.running = False
     st.success("Running Brute-Force Auto-Tune...")
@@ -107,14 +64,17 @@ if auto_tune:
     best_score = float("inf")
     best_params = None
 
-    kp_range = np.arange(0.1, 3.1, 0.3)
-    ki_range = np.arange(0.0, 1.1, 0.2)
-    kd_range = np.arange(0.0, 1.1, 0.2)
+    kp_range = np.arange(0.0, 4.1, 0.3)
+    ki_range = np.arange(0.0, 1.1, 0.05)
+    kd_range = np.arange(0.0, 4.1, 0.3)
 
     best_result_text = st.empty()
     progress = st.progress(0.0)
     total = len(kp_range) * len(ki_range) * len(kd_range)
     tested = 0
+
+    tune_dt = 0.02
+    tune_steps = int(6 / tune_dt)
 
     for kp_test in kp_range:
         for ki_test in ki_range:
@@ -128,29 +88,31 @@ if auto_tune:
                 max_pv = -float("inf")
                 setpoint = 1.0
 
-                for _ in range(int(10 / dt)):
-                    error = setpoint - pv
-                    integral += error * dt
-                    derivative = (error - prev_error) / dt
+                for _ in range(tune_steps):
+                    measured_pv = pv + sensor_bias
+                    error = setpoint - measured_pv
+                    integral += error * tune_dt
+                    derivative = (error - prev_error) / tune_dt
                     output = kp_test * error + ki_test * integral + kd_test * derivative
                     output = np.clip(output, -3, 3)
-                    acceleration = (output - damping * velocity) / mass
-                    velocity += acceleration * dt
-                    pv += velocity * dt
+                    acceleration = (output - damping * velocity + external_force) / mass
+                    velocity += acceleration * tune_dt
+                    pv += velocity * tune_dt
                     pv = np.clip(pv, -3, 3)
                     prev_error = error
-                    t += dt
+                    t += tune_dt
                     max_pv = max(max_pv, pv)
                     errors.append(abs(error))
 
-                    if t > 3:
-                        recent = errors[-int(1 / dt):]
+                    if t > 4:
+                        recent = errors[-int(1 / tune_dt):]
                         if all(e < 0.02 for e in recent):
                             break
 
                 overshoot = max_pv - setpoint
                 total_error = sum(errors)
-                score = t + overshoot + 0.5 * total_error
+                recent_error = np.mean(errors[-int(1.0 / tune_dt):])
+                score = t + 0.5 * overshoot + 0.5 * total_error + 25.0 * recent_error
 
                 if score < best_score:
                     best_score = score
@@ -180,8 +142,85 @@ if auto_tune:
     else:
         st.error("Brute-force tuning failed. Try expanding the range or simulation time.")
 
-# --- Run Main Simulation ---
+# --- Line Chart ---
+display_cols = ["Setpoint", "PV", "Output"]
+if show_velocity:
+    display_cols.append("Velocity")
+chart = st.line_chart(st.session_state.data.set_index("Time")[display_cols])
+
+# --- Physical Representation ---
+st.subheader("🧱 Physical Representation (Position on Track)")
+track_placeholder = st.empty()
+
+def draw_physical_system(pv_value):
+    fig, ax = plt.subplots(figsize=(6, 1.2))
+    ax.set_xlim(-3, 3)
+    ax.set_ylim(-0.5, 0.5)
+    ax.axis('off')
+    ax.hlines(0, -3, 3, colors='gray', linewidth=4)
+    ax.axvline(1.0, color='red', linestyle='--', linewidth=2)
+    ax.text(1.0, 0.3, '🎯 Setpoint', color='red', ha='center', fontsize=10)
+    try:
+        drone_img = plt.imread("drone.png")
+        img_extent = [pv_value - 0.4, pv_value + 0.4, -0.4, 0.4]
+        ax.imshow(drone_img, extent=img_extent, aspect='auto', zorder=5)
+    except:
+        ax.plot(pv_value, 0, 'o', markersize=20, color='blue')
+        st.warning("Drone image not found, showing dot instead.")
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.1)
+    buf.seek(0)
+    img = Image.open(buf)
+    track_placeholder.image(img)
+    plt.close(fig)
+
+# --- PID Step Simulation ---
+step_counter = 0
+def pid_step():
+    global step_counter
+    setpoint = 1.0
+    measured_pv = st.session_state.pv + sensor_bias
+    error = setpoint - measured_pv
+    st.session_state.integral += error * dt
+    derivative = (error - st.session_state.prev_error) / dt
+    output = Kp * error + Ki * st.session_state.integral + Kd * derivative
+    output = np.clip(output, -3, 3)
+    if noise_toggle:
+        output += np.random.normal(0, 0.05)
+    if st.session_state.inject_disturbance:
+        st.session_state.velocity -= disturbance_strength
+        st.session_state.inject_disturbance = False
+    acceleration = (output - damping * st.session_state.velocity + external_force) / mass
+    st.session_state.velocity += acceleration * dt
+    st.session_state.pv += st.session_state.velocity * dt
+    st.session_state.pv = np.clip(st.session_state.pv, -3, 3)
+    st.session_state.prev_error = error
+    st.session_state.t += dt
+
+    row = pd.DataFrame({
+        "Time": [st.session_state.t],
+        "Setpoint": [setpoint],
+        "PV": [st.session_state.pv],
+        "Output": [output],
+        "Velocity": [st.session_state.velocity]
+    })
+    st.session_state.data = pd.concat([st.session_state.data, row], ignore_index=True)
+    st.session_state.data = st.session_state.data.tail(1000).reset_index(drop=True)
+
+    step_counter += 1
+    if step_counter % draw_interval == 0:
+        chart.add_rows(row.set_index("Time")[display_cols])
+        draw_physical_system(st.session_state.pv)
+
+# --- Button Logic ---
+if start:
+    st.session_state.running = True
+if disturb:
+    st.session_state.inject_disturbance = True
+if reset:
+    st.session_state.running = False
+
+# --- Main Loop ---
 if st.session_state.running:
     for _ in range(int(duration * fps)):
         pid_step()
-        time.sleep(dt)
